@@ -1,3 +1,2 @@
-flask
+streamlit
 supabase
-python-dotenv
