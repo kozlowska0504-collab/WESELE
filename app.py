@@ -1,10 +1,6 @@
 import streamlit as st
-from supabase import create_client
-from supabase.client import ClientOptions
-
-# =========================
-# KONFIGURACJA
-# =========================
+import psycopg
+from psycopg.rows import dict_row
 
 st.set_page_config(
     page_title="Nasze wesele",
@@ -12,13 +8,88 @@ st.set_page_config(
     layout="wide"
 )
 
-# Dane Supabase będą zapisane jako sekrety,
-# a NIE bezpośrednio w kodzie na GitHubie.
-supabase = create_client(
-    st.secrets["SUPABASE_URL"],
-    st.secrets["SUPABASE_SERVICE_KEY"],
-    options=ClientOptions(schema="public")
-)
+# =========================
+# POŁĄCZENIE Z BAZĄ
+# =========================
+
+def get_connection():
+    return psycopg.connect(
+        st.secrets["DATABASE_URL"],
+        row_factory=dict_row
+    )
+
+
+def execute(sql, params=None):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            conn.commit()
+
+
+def fetch_all(sql, params=None):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchall()
+
+
+# =========================
+# TWORZENIE TABEL
+# =========================
+
+def init_db():
+    execute("""
+        create table if not exists categories (
+            id bigserial primary key,
+            name text not null,
+            position integer default 0,
+            created_at timestamp default now()
+        );
+    """)
+
+    execute("""
+        create table if not exists tasks (
+            id bigserial primary key,
+            category_id bigint references categories(id) on delete cascade,
+            title text not null,
+            completed boolean default false,
+            notes text,
+            created_at timestamp default now()
+        );
+    """)
+
+    execute("""
+        create table if not exists guests (
+            id bigserial primary key,
+            name text not null,
+            side text,
+            status text default 'Brak odpowiedzi',
+            plus_one boolean default false,
+            children integer default 0,
+            accommodation boolean default false,
+            transport boolean default false,
+            diet text,
+            notes text,
+            created_at timestamp default now()
+        );
+    """)
+
+    execute("""
+        create table if not exists budget (
+            id bigserial primary key,
+            name text not null,
+            category text,
+            estimated_price numeric default 0,
+            actual_price numeric default 0,
+            deposit numeric default 0,
+            paid boolean default false,
+            notes text,
+            created_at timestamp default now()
+        );
+    """)
+
+
+init_db()
 
 
 # =========================
@@ -28,80 +99,31 @@ supabase = create_client(
 st.markdown("""
 <style>
 
-    .stApp {
-        background-color: #faf8f5;
-    }
+.stApp {
+    background-color: #faf8f5;
+}
 
-    h1, h2, h3 {
-        color: #4b4038;
-    }
+[data-testid="stSidebar"] {
+    background-color: #eee6de;
+}
 
-    [data-testid="stSidebar"] {
-        background-color: #f1ebe5;
-    }
+.block-container {
+    padding-top: 2rem;
+}
 
-    div[data-testid="stMetric"] {
-        background: white;
-        border-radius: 16px;
-        padding: 15px;
-        border: 1px solid #e8e0d8;
-    }
+div[data-testid="stMetric"] {
+    background-color: white;
+    padding: 15px;
+    border-radius: 15px;
+    border: 1px solid #e5ddd5;
+}
 
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 3rem;
-    }
+h1, h2, h3 {
+    color: #55473d;
+}
 
 </style>
 """, unsafe_allow_html=True)
-
-
-# =========================
-# FUNKCJE
-# =========================
-
-def get_categories():
-    response = (
-        supabase
-        .table("categories")
-        .select("*")
-        .order("position")
-        .execute()
-    )
-    return response.data
-
-
-def get_tasks():
-    response = (
-        supabase
-        .table("tasks")
-        .select("*")
-        .order("created_at")
-        .execute()
-    )
-    return response.data
-
-
-def get_guests():
-    response = (
-        supabase
-        .table("guests")
-        .select("*")
-        .order("name")
-        .execute()
-    )
-    return response.data
-
-
-def get_budget():
-    response = (
-        supabase
-        .table("budget")
-        .select("*")
-        .order("created_at")
-        .execute()
-    )
-    return response.data
 
 
 # =========================
@@ -112,14 +134,13 @@ st.sidebar.title("💍 NASZE WESELE")
 st.sidebar.caption("Planner organizacji")
 
 page = st.sidebar.radio(
-    "Menu",
+    "",
     [
         "🏠 Strona główna",
         "✅ Organizacja",
         "👥 Lista gości",
         "💰 Budżet"
-    ],
-    label_visibility="collapsed"
+    ]
 )
 
 
@@ -132,100 +153,62 @@ if page == "🏠 Strona główna":
     st.title("💍 Nasze wesele")
     st.write("Wszystko, co trzeba zorganizować, w jednym miejscu.")
 
-    categories = get_categories()
-    tasks = get_tasks()
-    guests = get_guests()
-    budget = get_budget()
+    tasks = fetch_all("select * from tasks")
+    guests = fetch_all("select * from guests")
+    budget = fetch_all("select * from budget")
 
-    completed_tasks = sum(
-        1 for task in tasks
-        if task["completed"]
-    )
+    completed = sum(1 for task in tasks if task["completed"])
 
-    all_tasks = len(tasks)
-
-    confirmed_guests = sum(
+    confirmed = sum(
         1 for guest in guests
         if guest["status"] == "Potwierdzony"
     )
 
-    estimated_budget = sum(
-        float(item["estimated_price"] or 0)
-        for item in budget
-    )
-
-    actual_budget = sum(
+    actual_cost = sum(
         float(item["actual_price"] or 0)
         for item in budget
     )
 
     col1, col2, col3, col4 = st.columns(4)
 
-    with col1:
-        st.metric(
-            "Zadania",
-            f"{completed_tasks}/{all_tasks}"
-        )
+    col1.metric(
+        "Zadania",
+        f"{completed}/{len(tasks)}"
+    )
 
-    with col2:
-        st.metric(
-            "Goście",
-            len(guests)
-        )
+    col2.metric(
+        "Goście",
+        len(guests)
+    )
 
-    with col3:
-        st.metric(
-            "Potwierdzili",
-            confirmed_guests
-        )
+    col3.metric(
+        "Potwierdzili",
+        confirmed
+    )
 
-    with col4:
-        st.metric(
-            "Wydano",
-            f"{actual_budget:,.2f} zł"
-        )
+    col4.metric(
+        "Wydano",
+        f"{actual_cost:,.0f} zł"
+    )
 
     st.divider()
 
     st.subheader("Postęp organizacji")
 
-    if all_tasks > 0:
-        progress = completed_tasks / all_tasks
+    if tasks:
+
+        progress = completed / len(tasks)
+
         st.progress(progress)
 
         st.write(
-            f"Ukończono **{completed_tasks} z {all_tasks} zadań**."
+            f"Zrobione **{completed} z {len(tasks)} zadań**"
         )
+
     else:
+
         st.info(
-            "Nie masz jeszcze żadnych zadań. "
-            "Dodaj pierwsze w zakładce Organizacja."
-        )
-
-    st.divider()
-
-    st.subheader("Budżet")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(
-            "Planowany",
-            f"{estimated_budget:,.2f} zł"
-        )
-
-    with col2:
-        st.metric(
-            "Wydano",
-            f"{actual_budget:,.2f} zł"
-        )
-
-    with col3:
-        remaining = estimated_budget - actual_budget
-
-        st.metric(
-            "Pozostało",
-            f"{remaining:,.2f} zł"
+            "Nie masz jeszcze żadnych zadań."
         )
 
 
@@ -237,52 +220,42 @@ elif page == "✅ Organizacja":
 
     st.title("✅ Organizacja")
 
-    categories = get_categories()
-    tasks = get_tasks()
+    tab1, tab2 = st.tabs([
+        "📋 Zadania",
+        "➕ Dodaj"
+    ])
 
-    tab1, tab2 = st.tabs(
-        [
-            "📋 Zadania",
-            "➕ Dodaj"
-        ]
+    categories = fetch_all(
+        "select * from categories order by position, created_at"
     )
 
-    # ---------- ZADANIA ----------
+    tasks = fetch_all(
+        "select * from tasks order by created_at"
+    )
 
     with tab1:
 
         if not categories:
-
-            st.info(
-                "Najpierw dodaj kategorię."
-            )
+            st.info("Dodaj pierwszą kategorię.")
 
         for category in categories:
 
-            category_id = category["id"]
-            category_name = category["name"]
-
             category_tasks = [
-                task
-                for task in tasks
-                if task["category_id"] == category_id
+                task for task in tasks
+                if task["category_id"] == category["id"]
             ]
 
             with st.expander(
-                f"📁 {category_name} ({len(category_tasks)})",
+                f"📁 {category['name']}",
                 expanded=True
             ):
 
                 if not category_tasks:
-                    st.caption(
-                        "Brak zadań w tej kategorii."
-                    )
+                    st.caption("Brak zadań.")
 
                 for task in category_tasks:
 
-                    col1, col2 = st.columns(
-                        [8, 1]
-                    )
+                    col1, col2 = st.columns([8, 1])
 
                     with col1:
 
@@ -294,23 +267,19 @@ elif page == "✅ Organizacja":
 
                         if checked != task["completed"]:
 
-                            supabase.table(
-                                "tasks"
-                            ).update(
-                                {
-                                    "completed": checked
-                                }
-                            ).eq(
-                                "id",
-                                task["id"]
-                            ).execute()
+                            execute(
+                                """
+                                update tasks
+                                set completed = %s
+                                where id = %s
+                                """,
+                                (checked, task["id"])
+                            )
 
                             st.rerun()
 
                         if task["notes"]:
-                            st.caption(
-                                task["notes"]
-                            )
+                            st.caption(task["notes"])
 
                     with col2:
 
@@ -319,16 +288,12 @@ elif page == "✅ Organizacja":
                             key=f"delete_task_{task['id']}"
                         ):
 
-                            supabase.table(
-                                "tasks"
-                            ).delete().eq(
-                                "id",
-                                task["id"]
-                            ).execute()
+                            execute(
+                                "delete from tasks where id = %s",
+                                (task["id"],)
+                            )
 
                             st.rerun()
-
-    # ---------- DODAWANIE ----------
 
     with tab2:
 
@@ -341,149 +306,108 @@ elif page == "✅ Organizacja":
                 placeholder="np. Sala, Fotograf, Dekoracje"
             )
 
-            submit_category = st.form_submit_button(
-                "Dodaj kategorię"
-            )
+            if st.form_submit_button("Dodaj kategorię"):
 
-            if submit_category and category_name:
+                if category_name:
 
-                supabase.table(
-                    "categories"
-                ).insert(
-                    {
-                        "name": category_name
-                    }
-                ).execute()
+                    execute(
+                        """
+                        insert into categories (name)
+                        values (%s)
+                        """,
+                        (category_name,)
+                    )
 
-                st.success(
-                    "Kategoria została dodana."
-                )
-
-                st.rerun()
+                    st.rerun()
 
         st.divider()
 
         st.subheader("Dodaj zadanie")
 
-        categories = get_categories()
+        categories = fetch_all(
+            "select * from categories order by position, created_at"
+        )
 
         if categories:
 
-            category_names = {
-                category["name"]: category["id"]
-                for category in categories
+            category_dict = {
+                item["name"]: item["id"]
+                for item in categories
             }
 
             with st.form("task_form"):
 
-                task_title = st.text_input(
+                task_name = st.text_input(
                     "Zadanie",
                     placeholder="np. podpisać umowę z fotografem"
                 )
 
                 selected_category = st.selectbox(
                     "Kategoria",
-                    list(category_names.keys())
+                    list(category_dict.keys())
                 )
 
-                task_notes = st.text_area(
-                    "Notatka",
-                    placeholder="Opcjonalnie..."
+                notes = st.text_area(
+                    "Notatka"
                 )
 
-                submit_task = st.form_submit_button(
-                    "Dodaj zadanie"
-                )
+                if st.form_submit_button("Dodaj zadanie"):
 
-                if submit_task and task_title:
+                    if task_name:
 
-                    supabase.table(
-                        "tasks"
-                    ).insert(
-                        {
-                            "title": task_title,
-                            "category_id":
-                                category_names[selected_category],
-                            "notes": task_notes,
-                            "completed": False
-                        }
-                    ).execute()
+                        execute(
+                            """
+                            insert into tasks
+                            (category_id, title, notes)
+                            values (%s, %s, %s)
+                            """,
+                            (
+                                category_dict[selected_category],
+                                task_name,
+                                notes
+                            )
+                        )
 
-                    st.success(
-                        "Zadanie zostało dodane."
-                    )
-
-                    st.rerun()
-
-        else:
-
-            st.warning(
-                "Najpierw dodaj kategorię."
-            )
+                        st.rerun()
 
 
 # =========================
-# LISTA GOŚCI
+# GOŚCIE
 # =========================
 
 elif page == "👥 Lista gości":
 
     st.title("👥 Lista gości")
 
-    guests = get_guests()
-
-    total_guests = len(guests)
+    guests = fetch_all(
+        "select * from guests order by name"
+    )
 
     confirmed = sum(
-        1 for guest in guests
-        if guest["status"] == "Potwierdzony"
+        1 for g in guests
+        if g["status"] == "Potwierdzony"
     )
 
     declined = sum(
-        1 for guest in guests
-        if guest["status"] == "Odmówił"
+        1 for g in guests
+        if g["status"] == "Odmówił"
     )
 
-    waiting = total_guests - confirmed - declined
+    waiting = len(guests) - confirmed - declined
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric(
-        "Wszyscy",
-        total_guests
-    )
+    col1.metric("Wszyscy", len(guests))
+    col2.metric("Potwierdzili", confirmed)
+    col3.metric("Odmówili", declined)
+    col4.metric("Brak odpowiedzi", waiting)
 
-    col2.metric(
-        "Potwierdzili",
-        confirmed
-    )
-
-    col3.metric(
-        "Odmówili",
-        declined
-    )
-
-    col4.metric(
-        "Brak odpowiedzi",
-        waiting
-    )
-
-    tab1, tab2 = st.tabs(
-        [
-            "👥 Goście",
-            "➕ Dodaj gościa"
-        ]
-    )
-
-    # ---------- LISTA ----------
+    tab1, tab2 = st.tabs([
+        "👥 Goście",
+        "➕ Dodaj gościa"
+    ])
 
     with tab1:
-
-        if not guests:
-
-            st.info(
-                "Lista gości jest jeszcze pusta."
-            )
 
         for guest in guests:
 
@@ -491,93 +415,74 @@ elif page == "👥 Lista gości":
                 f"👤 {guest['name']} — {guest['status']}"
             ):
 
-                col1, col2 = st.columns(2)
+                st.write(
+                    f"**Strona:** {guest['side'] or '-'}"
+                )
 
-                with col1:
+                st.write(
+                    f"**Osoba towarzysząca:** "
+                    f"{'Tak' if guest['plus_one'] else 'Nie'}"
+                )
 
+                st.write(
+                    f"**Dzieci:** {guest['children']}"
+                )
+
+                st.write(
+                    f"**Nocleg:** "
+                    f"{'Tak' if guest['accommodation'] else 'Nie'}"
+                )
+
+                st.write(
+                    f"**Transport:** "
+                    f"{'Tak' if guest['transport'] else 'Nie'}"
+                )
+
+                if guest["diet"]:
                     st.write(
-                        f"**Strona:** "
-                        f"{guest['side'] or '-'}"
+                        f"**Dieta / alergie:** {guest['diet']}"
                     )
 
-                    st.write(
-                        f"**Osoba towarzysząca:** "
-                        f"{'Tak' if guest['plus_one'] else 'Nie'}"
-                    )
-
-                    st.write(
-                        f"**Dzieci:** "
-                        f"{guest['children'] or 0}"
-                    )
-
-                with col2:
-
-                    st.write(
-                        f"**Nocleg:** "
-                        f"{'Tak' if guest['accommodation'] else 'Nie'}"
-                    )
-
-                    st.write(
-                        f"**Transport:** "
-                        f"{'Tak' if guest['transport'] else 'Nie'}"
-                    )
-
-                    st.write(
-                        f"**Dieta:** "
-                        f"{guest['diet'] or '-'}"
-                    )
-
-                if guest["notes"]:
-
-                    st.write(
-                        f"**Uwagi:** {guest['notes']}"
-                    )
+                statuses = [
+                    "Brak odpowiedzi",
+                    "Potwierdzony",
+                    "Odmówił"
+                ]
 
                 status = st.selectbox(
                     "Status",
-                    [
-                        "Brak odpowiedzi",
-                        "Potwierdzony",
-                        "Odmówił"
-                    ],
-                    index=[
-                        "Brak odpowiedzi",
-                        "Potwierdzony",
-                        "Odmówił"
-                    ].index(guest["status"]),
-                    key=f"guest_status_{guest['id']}"
+                    statuses,
+                    index=statuses.index(guest["status"]),
+                    key=f"status_{guest['id']}"
                 )
 
                 if status != guest["status"]:
 
-                    supabase.table(
-                        "guests"
-                    ).update(
-                        {
-                            "status": status
-                        }
-                    ).eq(
-                        "id",
-                        guest["id"]
-                    ).execute()
+                    execute(
+                        """
+                        update guests
+                        set status = %s
+                        where id = %s
+                        """,
+                        (
+                            status,
+                            guest["id"]
+                        )
+                    )
 
                     st.rerun()
 
                 if st.button(
                     "🗑️ Usuń gościa",
-                    key=f"delete_guest_{guest['id']}"
+                    key=f"guest_delete_{guest['id']}"
                 ):
 
-                    supabase.table(
-                        "guests"
-                    ).delete().eq(
-                        "id",
-                        guest["id"]
-                    ).execute()
+                    execute(
+                        "delete from guests where id = %s",
+                        (guest["id"],)
+                    )
 
                     st.rerun()
-
-    # ---------- DODAWANIE ----------
 
     with tab2:
 
@@ -593,15 +498,6 @@ elif page == "👥 Lista gości":
                     "Wspólni",
                     "Panna Młoda",
                     "Pan Młody"
-                ]
-            )
-
-            status = st.selectbox(
-                "Status",
-                [
-                    "Brak odpowiedzi",
-                    "Potwierdzony",
-                    "Odmówił"
                 ]
             )
 
@@ -624,41 +520,44 @@ elif page == "👥 Lista gości":
             )
 
             diet = st.text_input(
-                "Dieta / alergie",
-                placeholder="np. wegetariańska"
+                "Dieta / alergie"
             )
 
             notes = st.text_area(
                 "Uwagi"
             )
 
-            submit_guest = st.form_submit_button(
-                "Dodaj gościa"
-            )
+            if st.form_submit_button("Dodaj gościa"):
 
-            if submit_guest and name:
+                if name:
 
-                supabase.table(
-                    "guests"
-                ).insert(
-                    {
-                        "name": name,
-                        "side": side,
-                        "status": status,
-                        "plus_one": plus_one,
-                        "children": children,
-                        "accommodation": accommodation,
-                        "transport": transport,
-                        "diet": diet,
-                        "notes": notes
-                    }
-                ).execute()
+                    execute(
+                        """
+                        insert into guests (
+                            name,
+                            side,
+                            plus_one,
+                            children,
+                            accommodation,
+                            transport,
+                            diet,
+                            notes
+                        )
+                        values (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            name,
+                            side,
+                            plus_one,
+                            children,
+                            accommodation,
+                            transport,
+                            diet,
+                            notes
+                        )
+                    )
 
-                st.success(
-                    "Gość został dodany."
-                )
-
-                st.rerun()
+                    st.rerun()
 
 
 # =========================
@@ -669,7 +568,9 @@ elif page == "💰 Budżet":
 
     st.title("💰 Budżet")
 
-    budget = get_budget()
+    budget = fetch_all(
+        "select * from budget order by created_at"
+    )
 
     estimated = sum(
         float(item["estimated_price"] or 0)
@@ -689,36 +590,26 @@ elif page == "💰 Budżet":
     col1, col2, col3 = st.columns(3)
 
     col1.metric(
-        "Planowany budżet",
-        f"{estimated:,.2f} zł"
+        "Planowany",
+        f"{estimated:,.0f} zł"
     )
 
     col2.metric(
-        "Faktyczny koszt",
-        f"{actual:,.2f} zł"
+        "Faktyczny",
+        f"{actual:,.0f} zł"
     )
 
     col3.metric(
-        "Wpłacone zaliczki",
-        f"{deposits:,.2f} zł"
+        "Zaliczki",
+        f"{deposits:,.0f} zł"
     )
 
-    tab1, tab2 = st.tabs(
-        [
-            "💳 Wydatki",
-            "➕ Dodaj wydatek"
-        ]
-    )
-
-    # ---------- WYDATKI ----------
+    tab1, tab2 = st.tabs([
+        "💳 Wydatki",
+        "➕ Dodaj wydatek"
+    ])
 
     with tab1:
-
-        if not budget:
-
-            st.info(
-                "Nie dodano jeszcze żadnych wydatków."
-            )
 
         for item in budget:
 
@@ -726,34 +617,20 @@ elif page == "💰 Budżet":
                 f"💳 {item['name']}"
             ):
 
-                col1, col2, col3 = st.columns(3)
-
-                col1.metric(
-                    "Plan",
-                    f"{float(item['estimated_price'] or 0):,.2f} zł"
+                st.write(
+                    f"Planowana cena: "
+                    f"**{float(item['estimated_price'] or 0):,.0f} zł**"
                 )
 
-                col2.metric(
-                    "Koszt",
-                    f"{float(item['actual_price'] or 0):,.2f} zł"
+                st.write(
+                    f"Faktyczna cena: "
+                    f"**{float(item['actual_price'] or 0):,.0f} zł**"
                 )
 
-                col3.metric(
-                    "Zaliczka",
-                    f"{float(item['deposit'] or 0):,.2f} zł"
+                st.write(
+                    f"Zaliczka: "
+                    f"**{float(item['deposit'] or 0):,.0f} zł**"
                 )
-
-                if item["category"]:
-
-                    st.write(
-                        f"**Kategoria:** {item['category']}"
-                    )
-
-                if item["notes"]:
-
-                    st.write(
-                        f"**Uwagi:** {item['notes']}"
-                    )
 
                 paid = st.checkbox(
                     "Opłacone",
@@ -763,34 +640,31 @@ elif page == "💰 Budżet":
 
                 if paid != item["paid"]:
 
-                    supabase.table(
-                        "budget"
-                    ).update(
-                        {
-                            "paid": paid
-                        }
-                    ).eq(
-                        "id",
-                        item["id"]
-                    ).execute()
+                    execute(
+                        """
+                        update budget
+                        set paid = %s
+                        where id = %s
+                        """,
+                        (
+                            paid,
+                            item["id"]
+                        )
+                    )
 
                     st.rerun()
 
                 if st.button(
                     "🗑️ Usuń",
-                    key=f"delete_budget_{item['id']}"
+                    key=f"budget_delete_{item['id']}"
                 ):
 
-                    supabase.table(
-                        "budget"
-                    ).delete().eq(
-                        "id",
-                        item["id"]
-                    ).execute()
+                    execute(
+                        "delete from budget where id = %s",
+                        (item["id"],)
+                    )
 
                     st.rerun()
-
-    # ---------- DODAWANIE ----------
 
     with tab2:
 
@@ -819,7 +693,7 @@ elif page == "💰 Budżet":
             )
 
             deposit = st.number_input(
-                "Wpłacona zaliczka",
+                "Zaliczka",
                 min_value=0.0,
                 step=100.0
             )
@@ -828,28 +702,30 @@ elif page == "💰 Budżet":
                 "Uwagi"
             )
 
-            submit_budget = st.form_submit_button(
-                "Dodaj wydatek"
-            )
+            if st.form_submit_button("Dodaj wydatek"):
 
-            if submit_budget and name:
+                if name:
 
-                supabase.table(
-                    "budget"
-                ).insert(
-                    {
-                        "name": name,
-                        "category": category,
-                        "estimated_price": estimated_price,
-                        "actual_price": actual_price,
-                        "deposit": deposit,
-                        "paid": False,
-                        "notes": notes
-                    }
-                ).execute()
+                    execute(
+                        """
+                        insert into budget (
+                            name,
+                            category,
+                            estimated_price,
+                            actual_price,
+                            deposit,
+                            notes
+                        )
+                        values (%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            name,
+                            category,
+                            estimated_price,
+                            actual_price,
+                            deposit,
+                            notes
+                        )
+                    )
 
-                st.success(
-                    "Wydatek został dodany."
-                )
-
-                st.rerun()
+                    st.rerun()
